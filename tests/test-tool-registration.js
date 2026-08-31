@@ -308,6 +308,7 @@ async function main() {
   loadSrc(sandbox, 'src/node-delay.js');
   loadSrc(sandbox, 'src/node-reverb.js');
   loadSrc(sandbox, 'src/node-limiter.js');
+  loadSrc(sandbox, 'src/chain-policy.js'); // ADR-0002: chain-policy must precede mcp-tools
   loadSrc(sandbox, 'src/mcp-tools.js'); // self-registers through the shim at parse
 
   // Let the shim's sequential registration queue drain (10 chained

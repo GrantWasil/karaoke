@@ -1846,13 +1846,13 @@ input.preset-name-input:focus-visible {
   outline-color: var(--focus-ring-on-accent);
 }
 
-/* Issue #7 — the fallback-mode hidden-tab HINT. Same element pattern as
-   the trip alert above but deliberately NON-alarming: the calm accent
-   (amber) edge instead of safety-red, role="status" (not "alert"), no
-   button — the remedy is bringing the tab back, not a click. Shown
-   only when the audio-worklet watchdog could NOT load (rAF-only
-   fallback) and the page went hidden while the engine is live; removed
-   on visibilitychange back. */
+/* The calm canvas HINT vocabulary — same element pattern as the trip
+   alert above but deliberately NON-alarming: the calm accent (amber)
+   edge instead of safety-red, role="status" (not "alert"), no button.
+   Two wearers: issue #7's fallback-mode hidden-tab warning ("bring the
+   tab back", removed on visibilitychange), and ADR-0002's chain-policy
+   note (#policy-note, src/canvas.js — warn-never-block on human edits
+   that break the chain rules; auto-hides). */
 .watchdog-alert.watchdog-hint {
   border-color: var(--accent);
 }

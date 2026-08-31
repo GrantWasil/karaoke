@@ -432,6 +432,36 @@
   }
 
   /**
+   * ADR-0002: after a preset Load, evaluate the loaded chain against the
+   * chain rules the agent is held to and WARN through the panel's own
+   * quiet note — the load already stands (warn, never block). Factory
+   * presets are policy-conformant by test, so this fires mostly for
+   * user presets saved before a rule existed (or edited by hand).
+   * Best-effort: absent ChainPolicy (bare harness) it is a silent no-op.
+   *
+   * @param {Array<Object>} nodes - the just-loaded chain entries.
+   */
+  function notePolicyViolations(nodes) {
+    if (!window.ChainPolicy || typeof window.ChainPolicy.checkChain !== 'function') {
+      return;
+    }
+    var violations;
+    try {
+      violations = window.ChainPolicy.checkChain(nodes) || [];
+    } catch (err) {
+      return; // a warning must never break the load that triggered it
+    }
+    if (violations.length === 0) {
+      return;
+    }
+    var line = window.ChainPolicy.humanSummary(violations[0]);
+    if (violations.length > 1) {
+      line += ' (+' + (violations.length - 1) + ' more)';
+    }
+    showPresetNote('Heads up — ' + line + '.');
+  }
+
+  /**
    * Rebuild #preset-select's <option> list: PS-4's two groups — a
    * "Factory" <optgroup> (window.FactoryPresets' library, first) and a
    * "Yours" <optgroup> (PresetStore.listNames()' user presets). Since
@@ -594,6 +624,7 @@
       setCurrentPreset(factoryPreset.name);
       clearModified();
       noteHumanEditGuarded();
+      notePolicyViolations(factoryPreset.nodes);
       return;
     }
 
@@ -613,6 +644,7 @@
     setCurrentPreset(result.name);
     clearModified();
     noteHumanEditGuarded();
+    notePolicyViolations(result.nodes);
   });
 
   // R2-3: Delete is two-step in-panel — no browser confirm(). The first

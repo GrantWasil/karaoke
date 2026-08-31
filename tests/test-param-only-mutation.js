@@ -513,6 +513,15 @@ function sawScheduledRamp(param, baseline, target, nowTime, rampS) {
 async function main() {
   var sandbox = createSandbox();
   loadSrc(sandbox, 'src/agent-ui.js');
+  loadSrc(sandbox, 'src/output-gate.js'); // ADR-0001: audio-graph hands the chain gate to OutputGate at creation
+  // getChainGate() is no longer exported (ADR-0001) — capture the gate at
+  // its one-time hand-over to OutputGate instead.
+  var realAttach = sandbox.OutputGate.attach;
+  sandbox.__chainGate = null;
+  sandbox.OutputGate.attach = function (gateNode, audioContext) {
+    sandbox.__chainGate = gateNode;
+    return realAttach(gateNode, audioContext);
+  };
   loadSrc(sandbox, 'src/audio-graph.js');
   loadSrc(sandbox, 'src/node-types.js');
   loadSrc(sandbox, 'src/audio-param-ramp.js');
@@ -524,6 +533,7 @@ async function main() {
   loadSrc(sandbox, 'src/node-limiter.js');
   loadSrc(sandbox, 'src/param-controls.js');
   loadSrc(sandbox, 'src/default-preset.js');
+  loadSrc(sandbox, 'src/chain-policy.js'); // ADR-0002: chain-policy must precede mcp-tools
   loadSrc(sandbox, 'src/mcp-tools.js');
 
   var records = {
@@ -608,7 +618,7 @@ async function main() {
     '0: physical n5 reverb seeded at mix 20'
   );
 
-  var gate = AG.getChainGate();
+  var gate = sandbox.__chainGate;
   var gateBase = gate.gain.__automation.length; // duck-detection baseline
   check(buildGraphCalls === 1 && records.loadModelCalls === 1,
     '0: the seed used exactly one loadModel -> buildGraph');

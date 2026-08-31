@@ -6,8 +6,8 @@
 //
 // Scope: PURE VISUAL + BALLISTICS. This module contains ZERO Web Audio API
 // usage, zero AnalyserNodes and zero localStorage — FEW-3 owns the two
-// analyser side-taps (IN off AudioEngine.sourceNode, OUT off
-// AudioGraph.getChainGate(), per docs/ultron/research/rq4-meters.md) and
+// analyser side-taps (IN off AudioEngine.sourceNode, OUT off the output
+// attenuator — final output, per docs/ultron/research/rq4-meters.md) and
 // pushes per-frame measurements into feed(). Everything that moves on
 // screen — attack, decay, RMS smoothing, peak-hold, clip latching — is
 // computed HERE, inside the component.

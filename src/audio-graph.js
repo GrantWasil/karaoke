@@ -20,21 +20,24 @@
 //     Limiter) will populate. Nothing registers into it yet — that's fine,
 //     `buildGraph([])` never consults it.
 //
-// AE-3 addendum: this file also owns the shared "chain gate" `GainNode` (see
-// getChainGate() below). AE-3 (bypass routing) needs a single point after
-// the last chain node it can ramp to silence independently of whatever
-// AudioBypass's own dry tap is doing. buildGraph() also tracks
-// `firstChainNode` — the specific node sourceNode is currently connected to
-// — so it can disconnect exactly that one edge on rebuild instead of a
-// blanket `sourceNode.disconnect()`, which would also sever AudioBypass's
-// independent tap off of sourceNode. See the comments in buildGraph() and
-// getChainGate() below.
+// AE-3 addendum: this file also CREATES and WIRES the shared "chain gate"
+// `GainNode` (see getChainGate() below) — a single point after the last
+// chain node where the whole chain can be silenced. Per ADR-0001, this
+// file owns the gate's TOPOLOGY only: its gain automation belongs to
+// src/output-gate.js, to which the node is handed over exactly once at
+// creation (OutputGate.attach). Nothing in this file (or anywhere else)
+// writes gate.gain directly — silence requests are OutputGate holds.
+// buildGraph() also tracks `firstChainNode` — the specific node sourceNode
+// is currently connected to — so it can disconnect exactly that one edge
+// on rebuild instead of a blanket `sourceNode.disconnect()`, which would
+// also sever AudioBypass's independent tap off of sourceNode. See the
+// comments in buildGraph() and getChainGate() below.
 //
 // AE-4 scope (this task) — buildGraph() is now glitch-free and reuse-aware:
-//   - Glitch-free live rewiring: a rebuild ramps the shared chain gate down
-//     to near-silence, performs the graph surgery while ducked, then ramps
-//     back up — no audible pop/click from tearing down and reconnecting live
-//     nodes. See rampGateTo() and the FADE_S constant below.
+//   - Glitch-free live rewiring: a rebuild holds the OutputGate 'duck'
+//     reason (near-silence), performs the graph surgery while ducked, then
+//     releases it — no audible pop/click from tearing down and reconnecting
+//     live nodes. The duck ramp length is OutputGate.DUCK_FADE_S.
 //   - Node-instance reuse across rebuilds: an id present in both the old and
 //     new model reuses the SAME AudioNode object (preserving internal DSP
 //     state — e.g. a compressor's envelope, a delay's buffer contents —
@@ -58,7 +61,7 @@
 // for one node, but not for EQ (src/node-eq.js), the first type built from
 // more than one internal AudioNode (three chained BiquadFilterNodes).
 // buildGraph() now identifies each resolved node's real input/output via
-// getNodeInput()/getNodeOutput() (defined near rampGateTo() below) instead
+// getNodeInput()/getNodeOutput() (defined just above buildGraph()) instead
 // of assuming the resolved value itself is directly connectable in both
 // directions. A factory may still return a plain AudioNode (Gain and
 // Compressor need zero changes) or, for a composite type, a plain object
@@ -126,12 +129,12 @@
   // Shared "chain gate" GainNode — sits between the last node in the effect
   // chain (or the mic source directly, if the model is empty) and the
   // host-owned outputAttenuator (see the MC-4 addendum in the file header).
-  // Created lazily on first need (either the first buildGraph() call, or
-  // the first getChainGate() call, whichever comes first) since it requires
-  // window.AudioEngine.audioContext to already exist. Steady-state gain is
-  // 1 (chain output audible). AE-3's AudioBypass ramps this to 0 when
-  // bypass is engaged, independent of whatever buildGraph() has wired
-  // downstream of it; AE-4 uses it for glitch-free rewiring ramps.
+  // Created lazily on first need (the first buildGraph() call) since it
+  // requires window.AudioEngine.audioContext to already exist. Created at
+  // gain 1 (chain output audible), then handed over to OutputGate
+  // (ADR-0001), which owns ALL of its gain automation from that point on:
+  // Bypass and the watchdog silence it via OutputGate holds, and this
+  // file's own rebuild duck is the 'duck' hold in buildGraph() below.
   var chainGate = null;
 
   // MC-4: host-owned output attenuator GainNode — chainGate ->
@@ -162,12 +165,6 @@
   var VERIFY_TEST_DURATION_S = 0.25;
   var VERIFY_TEST_SAMPLE_RATE = 44100;
 
-  // Fade duration (seconds) used both to duck the chain gate before a
-  // rebuild's graph surgery and to un-duck it afterward. 15ms, per the
-  // project's committed RQ-1 research — short enough to feel instant,
-  // long enough to avoid an audible click/pop from the gain jump.
-  var FADE_S = 0.015;
-
   // Handle for the currently-scheduled-but-not-yet-executed deferred rewire
   // (see buildGraph() below), or null if none is pending. Used to debounce
   // rapid successive buildGraph() calls: a new call cancels whatever rewire
@@ -176,9 +173,15 @@
   var pendingRewireTimer = null;
 
   /**
-   * Get the shared chain gate GainNode, creating it on first call if it
-   * doesn't exist yet. Requires window.AudioEngine.audioContext to already
-   * exist (i.e. call after AudioEngine.start() has resolved).
+   * INTERNAL — get the shared chain gate GainNode, creating it on first
+   * call if it doesn't exist yet. Requires window.AudioEngine.audioContext
+   * to already exist (i.e. call after AudioEngine.start() has resolved).
+   *
+   * No longer exported (ADR-0001): the node's gain automation belongs to
+   * OutputGate, so handing the raw node out would reopen the exact
+   * three-writers seam leak this refactor closed. On creation the node is
+   * handed over to OutputGate exactly once — from then on this file only
+   * ever WIRES it (topology), never writes its gain.
    *
    * @returns {GainNode}
    */
@@ -193,6 +196,7 @@
       }
       chainGate = audioContext.createGain();
       chainGate.gain.value = 1; // normal operation — chain output audible by default
+      window.OutputGate.attach(chainGate, audioContext);
     }
     return chainGate;
   }
@@ -482,23 +486,6 @@
   }
 
   /**
-   * Ramp `gate`'s gain to `target` over FADE_S seconds, starting from
-   * audioContext.currentTime, using the standard click-avoiding pattern:
-   * cancel any pending automation, pin the param at its current value at
-   * `now`, then a linear ramp from there to the target.
-   *
-   * @param {GainNode} gate
-   * @param {number} target
-   * @param {AudioContext} audioContext
-   */
-  function rampGateTo(gate, target, audioContext) {
-    var now = audioContext.currentTime;
-    gate.gain.cancelScheduledValues(now);
-    gate.gain.setValueAtTime(gate.gain.value, now);
-    gate.gain.linearRampToValueAtTime(target, now + FADE_S);
-  }
-
-  /**
    * (Re)build the real Web Audio node chain from the mic source through to
    * the AudioContext destination, per `model`.
    *
@@ -540,13 +527,11 @@
    * new — sequential teardown-then-rebuild is exactly as inaudible and
    * avoids that bug entirely.
    *
-   * The un-duck at the end does NOT unconditionally ramp to 1.0: if
-   * AudioBypass is currently engaged, the chain gate's correct steady state
-   * is 0 (muted), not 1 — naively restoring to 1.0 would silently disengage
-   * Bypass as a side effect of an unrelated chain edit, which would be a
-   * real safety bug (Bypass must stay engaged independent of chain edits,
-   * per its own AE-3 design). The un-duck ramps to whatever the currently-
-   * correct target actually is.
+   * The duck is an OutputGate hold (ADR-0001): releasing 'duck' at the end
+   * ramps back up ONLY when no other hold is active. A rebuild while
+   * Bypass is engaged or the watchdog is latched therefore can never
+   * schedule an upward ramp — the precedence rule lives inside OutputGate,
+   * not here, and this function no longer consults either module.
    *
    * This deliberately does NOT touch any other connection sourceNode may
    * have — notably AudioBypass's independent dry tap (src/audio-bypass.js)
@@ -648,7 +633,7 @@
       pendingRewireTimer = null;
     }
 
-    rampGateTo(gate, 0.0001, audioContext);
+    window.OutputGate.hold('duck');
 
     pendingRewireTimer = setTimeout(function () {
       pendingRewireTimer = null;
@@ -711,8 +696,8 @@
       // per the Web Audio spec) but must still happen here every rebuild:
       // without a path onward to destination, the audio thread never
       // evaluates the gate's gain automation at all — silent forever, and
-      // rampGateTo()/AudioBypass's own ramps on this same node become
-      // inert. The attenuator's own ->destination edge was made once, at
+      // OutputGate's ramps on this node become inert. The attenuator's
+      // own ->destination edge was made once, at
       // its creation inside getOutputAttenuator(), and is deliberately NOT
       // touched by this teardown/rebuild: teardown above disconnects only
       // nodes in oldNodeInstances, so chainGate -> attenuator ->
@@ -729,38 +714,22 @@
         return { id: entry.id, type: entry.type, params: Object.assign({}, entry.params || {}) };
       });
 
-      // Un-duck — but NOT unconditionally to 1.0. Two states besides
-      // "audible" can own the gate's correct steady state:
-      //   - If AudioBypass is currently engaged, the chain gate's
-      //     correct steady state is 0 (muted), not 1 — naively restoring
-      //     to 1.0 here would silently DISENGAGE Bypass as a side effect
-      //     of an unrelated chain edit, which would be a real safety bug
-      //     (Bypass must stay engaged independent of chain edits, per
-      //     its own AE-3 design).
-      //   - If FEW-3's watchdog is latched (issue #3), the gate belongs
-      //     at the watchdog's mute level WHATEVER Bypass's state is: a
-      //     rebuild racing a live trip must never schedule an upward
-      //     ramp that reopens tripped output. Only the human "Restore
-      //     output" button (src/meter-taps.js) may lift the latch;
-      //     MeterTaps' defend-the-mute loop is the backstop if anything
-      //     else tries. The typeof guard keeps this safe in harnesses
-      //     that load audio-graph.js without meter-taps.js.
-      var watchdogLatched =
-        window.MeterTaps &&
-        typeof window.MeterTaps.isTripped === 'function' &&
-        window.MeterTaps.isTripped();
-      var target = watchdogLatched
-        ? 0
-        : (window.AudioBypass && window.AudioBypass.isEngaged()) ? 0 : 1.0;
-      rampGateTo(gate, target, audioContext);
-    }, FADE_S * 1000 + 5);
+      // Un-duck: release this rebuild's hold. OutputGate ramps back to
+      // audible ONLY if no other hold (watchdog latch, Bypass) is active
+      // — a rebuild racing a live trip or landing while bypassed can
+      // never schedule an upward ramp, and this file no longer needs to
+      // know those modules exist (ADR-0001).
+      window.OutputGate.release('duck');
+    }, window.OutputGate.DUCK_FADE_S * 1000 + 5);
   }
 
   window.AudioGraph = {
     registerNodeType: registerNodeType,
     getModel: getModel,
     buildGraph: buildGraph,
-    getChainGate: getChainGate,
+    // getChainGate is deliberately NOT exported (ADR-0001): the gate's
+    // gain automation belongs to OutputGate — silence the chain by
+    // holding a reason there, never by writing the node directly.
     getNodeInstance: getNodeInstance,
     updateNodeParams: updateNodeParams,
     // MC-4 (host attenuator, RQ-3): read-only access for FEW-3's watchdog

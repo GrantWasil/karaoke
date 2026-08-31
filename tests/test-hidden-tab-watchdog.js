@@ -327,10 +327,17 @@ function createSandbox(opts) {
       return clearTimeout(id);
     },
     setInterval: function (fn) {
-      intervalFns.push(fn);
-      return intervalFns.length;
+      // Recorded, never auto-fired; cleared ones are marked so the
+      // harness can distinguish live timers (meter-taps' watchTick,
+      // OutputGate's invariant check) from released ones.
+      intervalFns.push({ fn: fn, cleared: false });
+      return intervalFns.length; // 1-based id
     },
-    clearInterval: function () {},
+    clearInterval: function (id) {
+      if (intervalFns[id - 1]) {
+        intervalFns[id - 1].cleared = true;
+      }
+    },
     performance: {
       now: function () {
         return perfNow;
@@ -403,9 +410,18 @@ function loadSrc(sandbox, relPath) {
  *  build + taps), settle the deferred rewire, then let the worklet
  *  promise chain run. Returns the shared handles. */
 async function boot(sandbox) {
+  loadSrc(sandbox, 'src/output-gate.js'); // ADR-0001: must precede audio-graph.js
   loadSrc(sandbox, 'src/audio-graph.js');
   loadSrc(sandbox, 'src/audio-bypass.js');
   loadSrc(sandbox, 'src/meter-taps.js');
+  // getChainGate() is no longer exported (ADR-0001) — capture the gate
+  // node at its one-time hand-over to OutputGate instead.
+  var realAttach = sandbox.OutputGate.attach;
+  sandbox.__chainGate = null;
+  sandbox.OutputGate.attach = function (gateNode, audioContext) {
+    sandbox.__chainGate = gateNode;
+    return realAttach(gateNode, audioContext);
+  };
   sandbox.AudioBypass.reconnectSource();
   sandbox.AudioGraph.buildGraph([]);
   await sleep(60);
@@ -414,7 +430,7 @@ async function boot(sandbox) {
   return {
     AG: sandbox.AudioGraph,
     MT: sandbox.MeterTaps,
-    gate: sandbox.AudioGraph.getChainGate(),
+    gate: sandbox.__chainGate,
     attenuator: sandbox.AudioGraph.getOutputAttenuator()
   };
 }
@@ -425,11 +441,23 @@ function findEl(sandbox, id) {
   })[0];
 }
 
+function liveIntervalFns(sandbox) {
+  return sandbox.__intervalFns.filter(function (rec) {
+    return !rec.cleared;
+  });
+}
+
 function tick(sandbox) {
-  if (sandbox.__intervalFns.length === 0) {
-    throw new Error('test bug: no watchdog interval was installed (worklet mode never went live?)');
+  var live = liveIntervalFns(sandbox);
+  if (live.length === 0) {
+    throw new Error('test bug: no live watchdog interval was installed (worklet mode never went live?)');
   }
-  sandbox.__intervalFns[0]();
+  // Fire every LIVE interval exactly once — real timers would run both
+  // meter-taps' watchTick and (while a hold is active) OutputGate's
+  // invariant check.
+  live.forEach(function (rec) {
+    rec.fn();
+  });
 }
 
 function linear(db) {
@@ -704,8 +732,8 @@ async function testFallbackMode(workletOpt, label) {
 
   check(sandbox.__createdWorklets.length === 0, 'H1(' + label + '): no AudioWorkletNode was created');
   check(
-    sandbox.__intervalFns.length === 0,
-    'H1(' + label + '): the interval latch is NOT installed in fallback mode (rAF-only, documented)'
+    liveIntervalFns(sandbox).length === 0,
+    'H1(' + label + '): no LIVE interval latch in fallback mode (rAF-only, documented; the boot duck\'s transient OutputGate check is already cleared)'
   );
 
   // Interim mitigation: hidden while live -> warning; visible -> cleared.

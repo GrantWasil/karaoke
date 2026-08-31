@@ -48,7 +48,10 @@ actual mic and the actual room.
       mutes output and shows the alert — and only the human **Restore
       output** button brings it back (never an agent, never a rebuild).
 - [ ] **Bypass** (button or spacebar) from across the room: instant clean
-      mic, and engage/disengage again mid-song with no glitch.
+      mic, and engage/disengage again mid-song with no glitch. Note
+      (ADR-0003): the dry Bypass path deliberately skips the output
+      attenuator — the −6 dBFS ceiling is a WET-PATH claim; bypassed, the
+      room hears the raw mic level, exactly as if the app were absent.
 - [ ] Date / operator / result: ____________
 
 ## 2. Audible-DSP checks

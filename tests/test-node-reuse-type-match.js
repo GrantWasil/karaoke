@@ -256,11 +256,21 @@ function getTool(sandbox, name) {
 // ----------------------------------------------------------------------
 async function main() {
   var sandbox = createSandbox();
+  loadSrc(sandbox, 'src/output-gate.js'); // ADR-0001: audio-graph hands the chain gate to OutputGate at creation
+  // getChainGate() is no longer exported (ADR-0001) — capture the gate at
+  // its one-time hand-over to OutputGate instead.
+  var realAttach = sandbox.OutputGate.attach;
+  sandbox.__chainGate = null;
+  sandbox.OutputGate.attach = function (gateNode, audioContext) {
+    sandbox.__chainGate = gateNode;
+    return realAttach(gateNode, audioContext);
+  };
   loadSrc(sandbox, 'src/audio-graph.js');
   loadSrc(sandbox, 'src/node-types.js');
   loadSrc(sandbox, 'src/audio-param-ramp.js'); // issue #5: the ramp helper the node applyParam handlers call
   loadSrc(sandbox, 'src/node-gain.js');
   loadSrc(sandbox, 'src/node-limiter.js');
+  loadSrc(sandbox, 'src/chain-policy.js'); // ADR-0002: chain-policy must precede mcp-tools
   loadSrc(sandbox, 'src/mcp-tools.js');
   installChainCanvasStub(sandbox);
   var applyParamCalls = installApplyParamRecorder(sandbox);
@@ -345,7 +355,7 @@ async function main() {
     'A2: sourceNode now feeds the fresh limiter'
   );
   check(
-    limInst.__connectsTo(AG.getChainGate()),
+    limInst.__connectsTo(sandbox.__chainGate),
     'A2: the fresh limiter feeds the chain gate'
   );
 
@@ -375,7 +385,7 @@ async function main() {
   );
   check(
     sandbox.AudioEngine.sourceNode.__connectsTo(limInst) &&
-      limInst.__connectsTo(AG.getChainGate()),
+      limInst.__connectsTo(sandbox.__chainGate),
     'B1: reused instance rewired into the chain'
   );
 

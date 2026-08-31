@@ -214,6 +214,7 @@ async function main() {
   loadSrc(sandbox, 'src/node-limiter.js');
   loadSrc(sandbox, 'src/default-preset.js');
   loadSrc(sandbox, 'src/factory-presets.js');
+  loadSrc(sandbox, 'src/chain-policy.js'); // ADR-0002: chain-policy must precede mcp-tools
   loadSrc(sandbox, 'src/mcp-tools.js');
   installChainCanvasStub(sandbox);
 

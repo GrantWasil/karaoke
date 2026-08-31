@@ -389,6 +389,7 @@ function liveToasts(sandbox) {
 async function main() {
   var sandbox = createSandbox();
   loadSrc(sandbox, 'src/agent-ui.js');
+  loadSrc(sandbox, 'src/output-gate.js'); // ADR-0001: audio-graph hands the chain gate to OutputGate at creation
   loadSrc(sandbox, 'src/audio-graph.js');
   loadSrc(sandbox, 'src/node-types.js');
   loadSrc(sandbox, 'src/audio-param-ramp.js'); // issue #5: the ramp helper the node applyParam handlers call
@@ -399,6 +400,7 @@ async function main() {
   loadSrc(sandbox, 'src/node-reverb.js');
   loadSrc(sandbox, 'src/node-limiter.js');
   loadSrc(sandbox, 'src/default-preset.js');
+  loadSrc(sandbox, 'src/chain-policy.js'); // ADR-0002: chain-policy must precede mcp-tools
   loadSrc(sandbox, 'src/mcp-tools.js');
   installChainCanvasStub(sandbox);
 

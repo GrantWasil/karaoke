@@ -508,6 +508,7 @@ function createEnv() {
 
   [
     'src/agent-ui.js',
+    'src/output-gate.js', // ADR-0001: audio-graph hands the chain gate to OutputGate at creation
     'src/audio-graph.js',
     'src/node-types.js',
     'src/audio-param-ramp.js',
@@ -520,6 +521,7 @@ function createEnv() {
     'src/default-preset.js',
     'src/preset-schema.js',
     'src/preset-store.js',
+    'src/chain-policy.js', // ADR-0002: chain-policy must precede presets-ui/canvas/mcp-tools
     'src/presets-ui.js',
     'src/param-controls.js',
     'src/canvas.js',

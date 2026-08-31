@@ -24,7 +24,7 @@
 // means connecting into the low-shelf filter; connecting FROM the chain's
 // OUTPUT means connecting from the high-shelf filter. This task's
 // audio-graph.js change (see its AE-7 addendum comment near the top of that
-// file, and getNodeInput()/getNodeOutput() alongside rampGateTo()) extends
+// file, and getNodeInput()/getNodeOutput() just above buildGraph()) extends
 // the factory contract to allow EITHER a plain AudioNode (unchanged — AE-5's
 // Gain and AE-6's Compressor need zero changes) OR a plain object shaped
 // `{ input: AudioNode, output: AudioNode, ...anythingElse }` for a composite

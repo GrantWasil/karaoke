@@ -327,6 +327,7 @@ function createEnv() {
     'src/preset-store.js',
     'src/factory-presets.js',
     'src/param-controls.js',
+    'src/chain-policy.js', // ADR-0002: chain-policy must precede presets-ui/canvas/mcp-tools
     'src/presets-ui.js',
     'src/canvas.js',
     'src/mcp-server.js',

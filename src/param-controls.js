@@ -313,6 +313,16 @@
         if (typeof onParamsChanged === 'function') {
           onParamsChanged(updatedParams);
         }
+
+        // ADR-0002: param values feed the chain rules too (a gain fader
+        // can bust the +12 dB budget with no structural change), so a
+        // fader move schedules the DEBOUNCED policy check — it runs once
+        // the hand settles, and only ever warns via the canvas note. The
+        // typeof guard keeps harnesses that stub ChainCanvas honest.
+        if (window.ChainCanvas &&
+            typeof window.ChainCanvas.schedulePolicyCheck === 'function') {
+          window.ChainCanvas.schedulePolicyCheck();
+        }
       });
 
       row.appendChild(label);

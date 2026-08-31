@@ -324,6 +324,7 @@ function createEnv() {
     'src/default-preset.js',
     'src/preset-schema.js',
     'src/preset-store.js',
+    'src/chain-policy.js', // ADR-0002: chain-policy must precede presets-ui/mcp-tools
     'src/presets-ui.js',
     'src/mcp-tools.js'
   ].forEach(function (relPath) {

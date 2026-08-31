@@ -427,6 +427,7 @@ function pumpFrames(count, stepMs) {
 // ----------------------------------------------------------------------
 async function main() {
   var sandbox = createSandbox();
+  loadSrc(sandbox, 'src/output-gate.js'); // ADR-0001: must precede audio-graph.js
   loadSrc(sandbox, 'src/audio-graph.js');
   loadSrc(sandbox, 'src/audio-bypass.js');
   loadSrc(sandbox, 'src/meter-taps.js');
@@ -434,6 +435,15 @@ async function main() {
   var AG = sandbox.AudioGraph;
   var AB = sandbox.AudioBypass;
   var MT = sandbox.MeterTaps;
+
+  // getChainGate() is no longer exported (ADR-0001) — capture the gate
+  // node at its one-time hand-over to OutputGate instead.
+  var realAttach = sandbox.OutputGate.attach;
+  sandbox.__chainGate = null;
+  sandbox.OutputGate.attach = function (gateNode, audioContext) {
+    sandbox.__chainGate = gateNode;
+    return realAttach(gateNode, audioContext);
+  };
 
   // Real constants the scenario math derives from (never restated here).
   var ceilingDb = AG.OUTPUT_CEILING_DBFS;
@@ -493,7 +503,7 @@ async function main() {
   await settle();
   MT.onEngineStarted(); // creates the taps, starts the ONE rAF loop
 
-  var gate = AG.getChainGate();
+  var gate = sandbox.__chainGate; // captured at OutputGate.attach above
   var attenuator = AG.getOutputAttenuator();
   var sourceNode = sandbox.AudioEngine.sourceNode;
   var destination = sandbox.__destination;
@@ -611,14 +621,23 @@ async function main() {
 
   check(MT.isTripped() === true, 'D1: still tripped after the rebuild');
   check(
-    sinceD.length > 0 && upward(sinceD).length === 0,
-    'D1: rebuild duck/un-duck scheduled NO upward ramp while latched (all targets <= mute level)'
+    upward(sinceD).length === 0,
+    'D1: rebuild duck/un-duck scheduled NO upward ramp while latched'
+  );
+  // ADR-0001: while the watchdog hold is active the gate is already at
+  // the mute target, so the rebuild's duck/un-duck schedules NOTHING at
+  // all — precedence is arbitration inside OutputGate, not a defensive
+  // ramp at the writer (the old code actively ramped to 0 here).
+  check(
+    sinceD.filter(function (e) {
+      return e.type === 'linearRamp' || e.type === 'setTarget';
+    }).length === 0,
+    'D1: the rebuild scheduled no gate transition at all while latched (arbitration, not scheduling)'
   );
   check(
-    sinceD.some(function (e) {
-      return e.type === 'linearRamp' && e.target === 0;
-    }),
-    'D1: the rebuild un-duck actively targeted the mute level (0), not Bypass-derived 1.0'
+    sandbox.OutputGate.isHeld('watchdog') === true &&
+      sandbox.OutputGate.isHeld('duck') === false,
+    'D1: after the rebuild settles, the watchdog hold stands and the duck hold was released'
   );
 
   // --------------------------------------------------------------------
@@ -671,17 +690,23 @@ async function main() {
   // --------------------------------------------------------------------
   console.log('F. LATCH: isTripped is read-only — assignment cannot change the latch');
   // --------------------------------------------------------------------
-  // Let the defend loop observe the current (muted) value first, then
-  // sabotage the exported property and climb the gate out-of-band: the
-  // defend-the-mute backstop firing proves the INTERNAL latch held.
-  pumpFrames(1, 50);
+  // The defense moved into OutputGate (ADR-0001): while any hold is
+  // active, its 250 ms invariant check re-asserts the mute if the
+  // observed gain RISES. The sandbox's setInterval is real, so waiting
+  // ~350 ms guarantees at least one tick. Let a tick observe the settled
+  // mute (the stub's setTarget never decays .value, so emulate it), then
+  // sabotage the exported latch probe and climb the gate out-of-band:
+  // the re-applied 0-ramp proves the INTERNAL latch held — nothing in
+  // the defense path even consults MeterTaps.isTripped anymore.
+  gate.gain.value = 0; // emulate the mute ramp having decayed to target
+  await sleep(350); // one invariant tick observes the settled 0
   var realIsTripped = MT.isTripped;
   MT.isTripped = function () {
     return false;
   };
   var snapF = gate.gain.__automation.length;
   gate.gain.value = 0.9; // a foreign writer climbing the gate, ignoring the API
-  pumpFrames(1, 50);
+  await sleep(350); // the next invariant tick must catch the rise
 
   check(
     gate.gain.__automation
@@ -689,7 +714,7 @@ async function main() {
       .some(function (e) {
         return e.type === 'setTarget' && e.target === 0;
       }),
-    'F1: with MeterTaps.isTripped overwritten, the latch STILL held — the defend loop re-applied the 0-ramp'
+    'F1: with MeterTaps.isTripped overwritten, the latch STILL held — OutputGate\'s invariant check re-applied the 0-ramp'
   );
   MT.isTripped = realIsTripped; // repair the property
   check(

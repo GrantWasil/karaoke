@@ -299,6 +299,121 @@
     if (window.AgentUI && typeof window.AgentUI.noteHumanEdit === 'function') {
       window.AgentUI.noteHumanEdit();
     }
+    // ADR-0002: evaluate the chain rules the agent is held to and WARN
+    // (never block) the operator — the edit above already stands.
+    runPolicyCheck();
+  }
+
+  // ---------------------------------------------------------------------
+  // ADR-0002 — the chain-policy note: warn, never block.
+  //
+  // Human structural edits (this file's commit above) and fader moves
+  // (src/param-controls.js, debounced through schedulePolicyCheck) are
+  // evaluated against the SAME chain rules ChainPolicy enforces on the
+  // agent — but violations here only surface this quiet note in the calm
+  // amber hint vocabulary (.watchdog-hint — role="status", never the
+  // safety-red alert). Preset loads warn through the presets panel's own
+  // note instead (src/presets-ui.js). The agent write path (loadModel)
+  // never reaches this: its violations are refused upstream by the tool
+  // planners, and warning again here would double-report.
+  // ---------------------------------------------------------------------
+
+  var policyNoteEl = null;
+  var policyNoteTimer = null;
+  var policyCheckTimer = null;
+  var POLICY_NOTE_HIDE_MS = 6000;
+  var POLICY_CHECK_DEBOUNCE_MS = 500;
+
+  /** Show (or refresh) the quiet policy note near the OUT anchor — the
+   *  same insertion convention as the safe-output note and the watchdog
+   *  alert. Re-showing resets the auto-hide timer. */
+  function showPolicyNote(text) {
+    var canvasEl = document.getElementById('chain-canvas');
+    if (!canvasEl) {
+      return; // no canvas panel (bare harness) — warning is best-effort
+    }
+    if (!policyNoteEl || !policyNoteEl.parentNode) {
+      var el = document.createElement('div');
+      el.id = 'policy-note';
+      el.className = 'watchdog-alert watchdog-hint policy-note';
+      el.setAttribute('role', 'status');
+      var span = document.createElement('span');
+      span.className = 'watchdog-alert-text';
+      el.appendChild(span);
+      var note = document.getElementById('safe-output-note');
+      var anchors = canvasEl.querySelectorAll ? canvasEl.querySelectorAll('.anchor') : null;
+      var outAnchor = anchors && anchors.length ? anchors[anchors.length - 1] : null;
+      if (note && note.parentNode === canvasEl) {
+        canvasEl.insertBefore(el, note.nextSibling);
+      } else if (outAnchor && outAnchor.parentNode === canvasEl) {
+        canvasEl.insertBefore(el, outAnchor.nextSibling);
+      } else {
+        canvasEl.appendChild(el);
+      }
+      policyNoteEl = el;
+    }
+    var textEl = policyNoteEl.querySelector('.watchdog-alert-text');
+    if (textEl) {
+      textEl.textContent = text;
+    }
+    if (policyNoteTimer !== null) {
+      clearTimeout(policyNoteTimer);
+    }
+    policyNoteTimer = setTimeout(hidePolicyNote, POLICY_NOTE_HIDE_MS);
+  }
+
+  function hidePolicyNote() {
+    if (policyNoteTimer !== null) {
+      clearTimeout(policyNoteTimer);
+      policyNoteTimer = null;
+    }
+    if (policyNoteEl) {
+      try {
+        if (policyNoteEl.parentNode) {
+          policyNoteEl.parentNode.removeChild(policyNoteEl);
+        }
+      } catch (err) {
+        /* already detached */
+      }
+      policyNoteEl = null;
+    }
+  }
+
+  /** Evaluate the chain rules against the current model and show/clear
+   *  the note. Guarded: without ChainPolicy loaded (a bare harness) the
+   *  warning feature degrades to nothing — warn-only means the guard is
+   *  honest, unlike the agent path where policy is a hard dependency. */
+  function runPolicyCheck() {
+    if (!window.ChainPolicy || typeof window.ChainPolicy.checkChain !== 'function') {
+      return;
+    }
+    var violations;
+    try {
+      violations = window.ChainPolicy.checkChain(chainModel) || [];
+    } catch (err) {
+      return; // a warning must never break the edit that triggered it
+    }
+    if (violations.length === 0) {
+      hidePolicyNote();
+      return;
+    }
+    var line = window.ChainPolicy.humanSummary(violations[0]);
+    if (violations.length > 1) {
+      line += ' (+' + (violations.length - 1) + ' more)';
+    }
+    showPolicyNote('HEADS UP — ' + line);
+  }
+
+  /** Debounced runPolicyCheck for continuous inputs (fader drags fire
+   *  per input event; the budget check waits for the hand to settle). */
+  function schedulePolicyCheck() {
+    if (policyCheckTimer !== null) {
+      clearTimeout(policyCheckTimer);
+    }
+    policyCheckTimer = setTimeout(function () {
+      policyCheckTimer = null;
+      runPolicyCheck();
+    }, POLICY_CHECK_DEBOUNCE_MS);
   }
 
   // ---------------------------------------------------------------------
@@ -495,30 +610,12 @@
       event.stopPropagation();
       card.remove();
       delete nodesById[id];
-      recomputeModelFromDom();
-      updateEmptyHint();
-      // Structural change (Part D) — recompute then rebuild, exactly once,
-      // immediately (not deferred to some other event).
-      rebuildGraph();
-      // PS-2: persist the chain after this structural change too. Pass
-      // chainModel explicitly (already recomputed above) rather than
-      // AudioGraph.getModel() — see the comment on
-      // Persistence.saveCurrentChain() for why: AudioGraph's own model
-      // commits asynchronously, ~20ms after rebuildGraph() returns, so
-      // reading through it right here would silently save the OLD,
-      // pre-removal model.
-      if (window.Persistence) {
-        window.Persistence.saveCurrentChain(chainModel);
-      }
-      // PS-3: removing a node is a user EDIT — mark unsaved.
-      if (window.PresetsUI) {
-        window.PresetsUI.markModified();
-      }
-      // Issue #6: a HUMAN removal — bump the state revision so a stale
-      // agent Undo entry can no longer auto-apply over it.
-      if (window.AgentUI && typeof window.AgentUI.noteHumanEdit === 'function') {
-        window.AgentUI.noteHumanEdit();
-      }
+      // Structural change (Part D) — the SAME chokepoint the SortableJS
+      // onSort handler and addNodeType() use (recompute, hint, rebuild,
+      // autosave, unsaved dot, human-edit revision bump, policy note).
+      // This used to be a hand-mirrored copy of that sequence; routing a
+      // removal through the shared commit keeps the two from drifting.
+      commitStructuralChange();
     });
 
     return card;
@@ -991,5 +1088,8 @@
     isDragActive: isDragActive,
     // Issue #5: the parameter-only write path (see updateNodeParam above).
     updateNodeParam: updateNodeParam,
+    // ADR-0002: debounced chain-rule warning for continuous human inputs
+    // (src/param-controls.js fader moves). Warn-only — never blocks.
+    schedulePolicyCheck: schedulePolicyCheck,
   };
 })();

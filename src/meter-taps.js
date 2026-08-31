@@ -142,8 +142,7 @@
 //     from the LATEST worklet peak (message delivery is not rAF-bound)
 //     and from analyserOut's frequency buffer (the AUDIO thread keeps
 //     filling an AnalyserNode's buffers while hidden — a main-thread
-//     read on a timer still sees fresh data). While tripped, the tick
-//     also runs the defend-the-mute backstop. Browsers throttle
+//     read on a timer still sees fresh data). Browsers throttle
 //     background-tab intervals to >= ~1 s (pages PLAYING audio are
 //     exempt from intensive throttling, and this app is) — HONEST
 //     cadence disclosure: while hidden the peak rule evaluates at
@@ -201,40 +200,38 @@
 //     noise gives ~half — both far below the bar.
 //
 //   TRIP (latches — NO auto-recover anywhere):
-//     - chainGate.gain ramped to 0 over ~20 ms: cancelScheduledValues +
-//       setValueAtTime(pin) + setTargetAtTime(0, now, MUTE_TC_S). The
-//       watchdog NEVER touches the bypass dry path or the host
-//       attenuator — mute is chainGate only, so Bypass remains the
-//       operator's true escape at all times.
+//     - OutputGate.hold('watchdog') (ADR-0001): OutputGate mutes the
+//       chain over ~20 ms and keeps defending the mute on its own
+//       invariant check while ANY hold is active. The watchdog NEVER
+//       touches the bypass dry path or the host attenuator — the mute
+//       is the chain path only, so Bypass remains the operator's true
+//       escape at all times. The trip-until-restore LATCH stays HERE
+//       (`tripped`): this module decides how long the hold lasts;
+//       OutputGate only arbitrates what the gate does while it does.
 //     - a .watchdog-alert element is created (JS-only, agent-ui
 //       pattern) after the OUT anchor / safe-output-note: 'OUTPUT
 //       MUTED — <reason>' plus a real 'Restore output' <button>.
 //     - AgentUI.reportMutation({source:'watchdog', summary:'Watchdog
 //       tripped — output muted (<reason>)', errorText: <threshold +
 //       duration>, nodeIds: []}) so agents/events observe the mute.
-//     - While latched, the loop DEFENDS the mute as a BACKSTOP (issue
-//       #3) — and so does the #7 interval tick while the tab is hidden
-//       (worklet mode), when rAF is stopped: buildGraph()'s un-duck and
-//       AudioBypass's disengage are
-//       themselves latch-aware — they consult MeterTaps.isTripped() and
-//       leave the gate at the mute level instead of ramping up — but any
-//       foreign writer that still climbs the gate is caught here: if the
-//       observed gain.value RISES while tripped, the 0-ramp is
-//       re-applied. No rebuild or tool call can out-wait the latch.
+//     - No rebuild or tool call can out-wait the latch: buildGraph()'s
+//       un-duck and AudioBypass's disengage release their OWN OutputGate
+//       holds, and OutputGate never ramps up while the watchdog hold is
+//       active — precedence is its single internal rule, not a check
+//       repeated at every writer.
 //
 //   RESTORE (human-only — the button click is the ONLY path; no agent
 //   tool, feed value, or meter state restores it):
-//     click → chainGate.gain ramped to its correct steady state
-//     (0 while Bypass is engaged — mirrors buildGraph()'s own
-//     un-duck target so restore can never un-mute the chain out from
-//     under an engaged bypass — otherwise 1) over ~50 ms
-//     (setTargetAtTime, RESTORE_TC_S); alert removed; detector state
-//     reset; a second toast 'Output restored by operator'.
+//     click → OutputGate.release('watchdog') — the chain comes back up
+//     over ~50 ms ONLY if no other hold (an engaged Bypass) remains, so
+//     restore can never un-mute the chain out from under an engaged
+//     bypass; alert removed; detector state reset; a second toast
+//     'Output restored by operator'.
 //
 // Everything below is defensive in the house style: any failure (no
-// AudioEngine, getChainGate() throwing, no DOM, no rAF) logs at most
-// ONE console diagnostic and leaves MeterTaps a harmless no-op — meter
-// wiring can never break the host app.
+// AudioEngine, no DOM, no rAF) logs at most ONE console diagnostic and
+// leaves MeterTaps a harmless no-op — meter wiring can never break the
+// host app.
 // =====================================================================
 (function () {
   'use strict';
@@ -288,17 +285,9 @@
   var HIDDEN_HOWL_WINDOW = 10;
   var HIDDEN_HOWL_MIN_RISING = 8;
 
-  // setTargetAtTime reaches ~95% of target at 3 time constants: these
-  // give the spec's ~20 ms mute ramp and ~50 ms restore ramp.
-  var MUTE_TC_S = 0.02 / 3;
-  var RESTORE_TC_S = 0.05 / 3;
-
-  // Latched-mute defense: re-apply the mute only when the observed
-  // gain.value RISES by more than this while tripped (a foreign writer
-  // — buildGraph's un-duck, Bypass disengage — is climbing the gate
-  // back up). Measuring the RISE, not the absolute, keeps the defense
-  // from fighting its own in-flight ramp.
-  var GAIN_RISE_EPS = 0.05;
+  // The mute/restore ramp curves and the latched-mute defense both moved
+  // to src/output-gate.js (ADR-0001) — this module holds and releases the
+  // 'watchdog' reason; OutputGate owns how the gate gets there.
 
   // ---------------------------------------------------------------------
   // Module state.
@@ -339,7 +328,6 @@
 
   // Watchdog latch.
   var tripped = false;
-  var lastSeenGain = 0; // chainGate gain as of the previous latched frame
   var alertEl = null;
 
   var failed = false; // one-strike disable (see safe())
@@ -446,18 +434,6 @@
   // Watchdog.
   // ---------------------------------------------------------------------
 
-  /** Ramp chainGate.gain to `target` with setTargetAtTime, replacing
-   *  any pending automation first (the standard click-avoiding pattern
-   *  used by AudioBypass/AudioGraph's own ramps). */
-  function rampGate(target, timeConstant) {
-    var ctx = window.AudioEngine && window.AudioEngine.audioContext;
-    var gate = window.AudioGraph.getChainGate();
-    var t = ctx.currentTime;
-    gate.gain.cancelScheduledValues(t);
-    gate.gain.setValueAtTime(gate.gain.value, t);
-    gate.gain.setTargetAtTime(target, t, timeConstant);
-  }
-
   /** Byte value HOWL_FLOOR_DB maps to on the analyser's byte scale
    *  (getByteFrequencyData maps minDecibels..maxDecibels to 0..255). */
   function howlFloorByte() {
@@ -467,8 +443,9 @@
     return b < 0 ? 0 : b > 255 ? 255 : b;
   }
 
-  /** Latch the trip: mute via chainGate only, show the alert, tell
-   *  agents/events why. Idempotent (the first reason wins). */
+  /** Latch the trip: hold OutputGate's 'watchdog' reason (the mute ramp,
+   *  precedence, and defense all live there — ADR-0001), show the alert,
+   *  tell agents/events why. Idempotent (the first reason wins). */
   function trip(reason, errorText) {
     if (tripped) {
       return;
@@ -477,12 +454,7 @@
     overSince = null;
     howlWindow = [];
 
-    rampGate(0, MUTE_TC_S);
-    try {
-      lastSeenGain = window.AudioGraph.getChainGate().gain.value;
-    } catch (err) {
-      lastSeenGain = 1;
-    }
+    window.OutputGate.hold('watchdog');
 
     ensureAlert(reason);
 
@@ -498,18 +470,6 @@
         warnOnce('MeterTaps: AgentUI.reportMutation failed on watchdog trip.');
       }
     }
-  }
-
-  /** While latched, hold the mute against foreign writers (buildGraph's
-   *  un-duck ramp, Bypass disengage). Only re-fires when the observed
-   *  gain RISES — see GAIN_RISE_EPS. */
-  function defendMute() {
-    var gain = window.AudioGraph.getChainGate().gain;
-    var v = gain.value;
-    if (v > GAIN_RISE_EPS && v > lastSeenGain + GAIN_RISE_EPS) {
-      rampGate(0, MUTE_TC_S);
-    }
-    lastSeenGain = v;
   }
 
   /** Peak rule (threshold derived live from OUTPUT_CEILING_DBFS). Same
@@ -622,8 +582,9 @@
     try {
       var t = now();
       if (tripped) {
-        // Backstop keeps working while hidden — rAF is stopped.
-        defendMute();
+        // Already latched — nothing to decide. OutputGate's own
+        // invariant check (armed while any hold is active) defends the
+        // mute, visible or hidden.
         return;
       }
       if (!pageHidden() && t - lastFrameAt < WATCHDOG_STALL_MS) {
@@ -888,13 +849,10 @@
     tripped = false;
     resetDetectors();
 
-    // Correct steady state, mirroring buildGraph()'s own un-duck target:
-    // while Bypass is engaged the chain gate belongs at 0 — restoring it
-    // to 1 here would put dry+wet on top of each other.
-    var bypassEngaged =
-      window.AudioBypass && typeof window.AudioBypass.isEngaged === 'function' &&
-      window.AudioBypass.isEngaged();
-    rampGate(bypassEngaged ? 0 : 1, RESTORE_TC_S);
+    // Release the hold. OutputGate ramps the chain back up (~50 ms)
+    // ONLY if no other hold remains — while Bypass is engaged the gate
+    // stays at 0, so restore can never put dry+wet on top of each other.
+    window.OutputGate.release('watchdog');
 
     hideAlert();
 
@@ -923,9 +881,7 @@
       }
       if (analyserOut) {
         var outStats = readAndFeed(SIDE_OUT, analyserOut);
-        if (tripped) {
-          defendMute();
-        } else {
+        if (!tripped) {
           watchOut(t, outStats);
         }
         lastFrameAt = t; // #7: stall detection for the interval latch
@@ -1106,15 +1062,14 @@
     });
   }
 
-  /** Issue #3: read-only latch probe. TRUE while the watchdog mute is
-   *  latched (from trip() until the human Restore button's restore()).
-   *  Consumers: AudioGraph's deferred un-duck and AudioBypass's
-   *  disengage both consult this to suppress any upward chain-gate ramp
-   *  while latched (the defend-the-mute loop remains the backstop).
-   *  Read-only by construction — the latch itself (`tripped`) is closed
-   *  over in this IIFE; nothing outside can write it, and overwriting
-   *  this property only blinds the caller's own reference, never the
-   *  latch or the loop. */
+  /** Read-only latch probe. TRUE while the watchdog mute is latched
+   *  (from trip() until the human Restore button's restore()). Since
+   *  ADR-0001 no audio module consults this — gate precedence lives in
+   *  OutputGate — it remains exported as disclosure (tests, harnesses,
+   *  status surfaces). Read-only by construction — the latch itself
+   *  (`tripped`) is closed over in this IIFE; nothing outside can write
+   *  it, and overwriting this property only blinds the caller's own
+   *  reference, never the latch or the loop. */
   function isTripped() {
     return tripped;
   }

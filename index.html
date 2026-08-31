@@ -185,6 +185,14 @@
   </div>
 
   <script src="src/audio-engine.js"></script>
+  <!--
+    ADR-0001 — the Output Gate (window.OutputGate, src/output-gate.js):
+    the single owner of chain audibility. Loads BEFORE audio-graph.js
+    (which hands it the chain gate node at creation via attach()) and
+    before every module that holds/releases a silence reason
+    (audio-graph's rebuild duck, audio-bypass, meter-taps' watchdog).
+  -->
+  <script src="src/output-gate.js"></script>
   <script src="src/audio-graph.js"></script>
   <script src="src/audio-bypass.js"></script>
   <script src="src/node-types.js"></script>
@@ -193,7 +201,7 @@
     (window.AudioParamRamp, src/audio-param-ramp.js): the ONE ramp every
     live AudioParam write by the node handlers below funnels through
     (cancel + setValueAtTime + linearRampToValueAtTime over 15 ms — the
-    house pattern audio-graph.js's rampGateTo() established), making the
+    house click-safe triple), making the
     'host-param-ramps' capability promise true. Loads BEFORE the six
     node-*.js files whose applyParam handlers call
     AudioParamRamp.schedule(); needs nothing itself at parse time.
@@ -205,6 +213,14 @@
   <script src="src/node-delay.js"></script>
   <script src="src/node-reverb.js"></script>
   <script src="src/node-limiter.js"></script>
+  <!--
+    ADR-0002 — Chain Policy (window.ChainPolicy, src/chain-policy.js):
+    the one loudness-policy engine both actors are evaluated against.
+    Loads BEFORE every consumer: the human edit paths (param-controls,
+    canvas, presets-ui) warn on its chain rules; the agent tool layer
+    (mcp-tools) refuses/clamps on them.
+  -->
+  <script src="src/chain-policy.js"></script>
   <script src="src/param-controls.js"></script>
   <script src="src/preset-schema.js"></script>
   <script src="src/default-preset.js"></script>
